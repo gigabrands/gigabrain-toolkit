@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# toolkit — fleet management for the GigaBrands developer toolkit.
+#
+#   toolkit doctor   audit this box against versions.yaml (the fleet manifest)
+#   toolkit update   git pull the toolkit repo, show what changed, re-run installer
+#   toolkit root     print the toolkit repo path
+#   toolkit help     this message
+#
+# Installed as a symlink in ~/.local/bin by installers/toolkit-bin.sh, so the
+# repo checkout stays the single source of truth.
+set -euo pipefail
+
+# Resolve the real repo root through the symlink.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+. "$ROOT/lib.sh"
+
+MANIFEST="$ROOT/versions.yaml"
+
+# manifest_get <key> — read a flat `key: "value"` pin from versions.yaml.
+manifest_get() {
+  sed -n "s/^$1:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" "$MANIFEST" | head -1
+}
+
+PASS=0; FAIL=0; WARNED=0
+check_ok()   { PASS=$((PASS+1)); ok "$*"; }
+check_fail() { FAIL=$((FAIL+1)); printf '  %sxx%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; }
+check_warn() { WARNED=$((WARNED+1)); warn "$*"; }
+
+cmd_doctor() {
+  [ -f "$MANIFEST" ] || die "doctor: manifest missing at $MANIFEST"
+  log "toolkit doctor — auditing $(hostname) ($(os)) against versions.yaml"
+
+  # --- PATH sanity -------------------------------------------------------
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) check_ok "~/.local/bin is on PATH" ;;
+    *) check_fail "~/.local/bin is NOT on PATH (dev/toolkit commands won't resolve)" ;;
+  esac
+
+  # --- core tools --------------------------------------------------------
+  for t in $(manifest_get core_tools); do
+    if command -v "$t" >/dev/null 2>&1; then
+      check_ok "core: $t"
+    else
+      check_fail "core: $t missing (run: ./install.sh --only cli-tools,gh)"
+    fi
+  done
+
+  # --- power tools + npm globals (format "package:binary") ---------------
+  for pair in $(manifest_get power_tools); do
+    bin="${pair##*:}"
+    if command -v "$bin" >/dev/null 2>&1; then
+      check_ok "power: $bin"
+    else
+      check_fail "power: $bin missing (run: ./install.sh --only power-tools)"
+    fi
+  done
+  if command -v op >/dev/null 2>&1; then
+    check_ok "power: op (1Password CLI)"
+  else
+    check_warn "power: op (1Password CLI) missing — secrets wrappers won't work"
+  fi
+  for pair in $(manifest_get optional_tools); do
+    bin="${pair##*:}"
+    command -v "$bin" >/dev/null 2>&1 && check_ok "optional: $bin (present)"
+  done
+  for pair in $(manifest_get npm_globals); do
+    bin="${pair##*:}"
+    if command -v "$bin" >/dev/null 2>&1; then
+      check_ok "npm-global: $bin"
+    else
+      check_fail "npm-global: $bin missing (run: ./install.sh --only npm-globals)"
+    fi
+  done
+
+  # --- node --------------------------------------------------------------
+  want_major="$(manifest_get node_major)"
+  if command -v node >/dev/null 2>&1; then
+    have="$(node -v | sed 's/^v\([0-9]*\).*/\1/')"
+    if [ "$have" = "$want_major" ]; then
+      check_ok "node: $(node -v) on PATH (pin: v$want_major)"
+    else
+      check_fail "node: $(node -v) on PATH but manifest pins v$want_major (run: ./install.sh --only node)"
+    fi
+    # default alias must ALSO match, or fresh shells drift from this one.
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+      def="$(set +eu; set +o pipefail; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; nvm version default 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')" || def=""
+      if [ "$def" = "$want_major" ]; then
+        check_ok "node: nvm default alias matches pin"
+      else
+        check_warn "node: nvm default is v${def:-unset}, pin is v$want_major — fresh shells will drift"
+      fi
+    else
+      check_warn "node: nvm not found (node may be brew-managed; fleet standard is nvm)"
+    fi
+  else
+    check_fail "node: not on PATH (run: ./install.sh --only node)"
+  fi
+
+  # --- python ------------------------------------------------------------
+  want_py="$(manifest_get python_default)"
+  if command -v uv >/dev/null 2>&1; then
+    if uv python find "$want_py" >/dev/null 2>&1; then
+      check_ok "python: uv has $want_py (pin)"
+    else
+      check_fail "python: uv missing CPython $want_py (run: ./install.sh --only python)"
+    fi
+  else
+    check_fail "python: uv not installed (run: ./install.sh --only python)"
+  fi
+
+  # --- agentic CLIs ------------------------------------------------------
+  for a in $(manifest_get required_agents); do
+    if command -v "$a" >/dev/null 2>&1; then
+      v="$("$a" --version 2>/dev/null | head -1 || true)"
+      check_ok "agent: $a ${v:+($v)}"
+    else
+      check_fail "agent: $a missing (run: ./install.sh --only $a)"
+    fi
+  done
+  for a in $(manifest_get optional_agents); do
+    if command -v "$a" >/dev/null 2>&1; then
+      check_ok "agent (optional): $a"
+    fi
+  done
+
+  # --- shared agent context ---------------------------------------------
+  for link in "$HOME/.codex/AGENTS.md" "$HOME/.claude/CLAUDE.md"; do
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "$ROOT/agents/AGENTS.md" ]; then
+      check_ok "agents-sync: $link → toolkit AGENTS.md"
+    elif [ -e "$link" ]; then
+      check_warn "agents-sync: $link exists but is not the toolkit symlink (run: ./install.sh --only agents-sync)"
+    else
+      check_warn "agents-sync: $link not linked (run: ./install.sh --only agents-sync)"
+    fi
+  done
+
+  # --- toolkit freshness --------------------------------------------------
+  if git -C "$ROOT" fetch -q origin 2>/dev/null; then
+    behind="$(git -C "$ROOT" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)"
+    if [ "${behind:-0}" -gt 0 ]; then
+      check_warn "toolkit: $behind commit(s) behind origin — run: toolkit update"
+    else
+      check_ok "toolkit: up to date with origin"
+    fi
+  else
+    check_warn "toolkit: could not reach origin to check freshness"
+  fi
+
+  # --- summary -----------------------------------------------------------
+  printf '\n'
+  log "doctor summary: ${PASS} ok, ${WARNED} warnings, ${FAIL} failures"
+  [ "$FAIL" -eq 0 ] || { warn "box is OUT OF SPEC — fix failures above, then re-run 'toolkit doctor'"; exit 1; }
+  ok "box is in spec"
+}
+
+cmd_update() {
+  log "toolkit update — syncing $(basename "$ROOT")"
+  git -C "$ROOT" diff --quiet 2>/dev/null || warn "local changes in toolkit repo; pull may fail"
+  old="$(git -C "$ROOT" rev-parse HEAD)"
+  git -C "$ROOT" pull --ff-only || die "update: git pull failed (resolve manually in $ROOT)"
+  new="$(git -C "$ROOT" rev-parse HEAD)"
+  if [ "$old" = "$new" ]; then
+    ok "already up to date"
+  else
+    log "changes since your last update:"
+    git -C "$ROOT" log --oneline "$old..$new" | sed 's/^/  /'
+  fi
+  printf '\n'
+  exec bash "$ROOT/install.sh" --update
+}
+
+case "${1:-help}" in
+  doctor) cmd_doctor ;;
+  update) cmd_update ;;
+  root)   echo "$ROOT" ;;
+  help|-h|--help) sed -n '2,10p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1 (try: toolkit help)" ;;
+esac

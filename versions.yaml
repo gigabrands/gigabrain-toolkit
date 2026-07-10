@@ -1,0 +1,31 @@
+# versions.yaml — the fleet manifest. Machine-readable pins for every dev box.
+# `toolkit doctor` audits the local machine against this file; installers use
+# it as the source of truth. Flat key: "value" pairs only (parsed by bash).
+#
+# Bump a pin here, commit, and every dev syncs with `toolkit update`.
+
+node_major: "24"
+python_default: "3.12"
+
+# Required core CLI tools (space-separated, checked for presence by doctor).
+core_tools: "git rg fd fzf bat jq tmux gh curl"
+
+# Power tools — Hunter's vetted stack, fleet-standard. Format "package:binary"
+# (binary is what doctor checks; package is what the installer installs).
+power_tools: "eza:eza git-delta:delta lazygit:lazygit htop:htop zoxide:zoxide atuin:atuin ffmpeg:ffmpeg yt-dlp:yt-dlp pandoc:pandoc git-filter-repo:git-filter-repo scc:scc"
+
+# Optional tools — installed only with TOOLKIT_INSTALL_OPTIONAL=1; doctor
+# reports them when present but never fails on them. Tailscale is here
+# deliberately: tailnet membership is invite-only (security policy), so the
+# binary is NOT part of the fleet standard.
+optional_tools: "tailscale:tailscale"
+
+# npm global CLIs — company stack (pm2 = prod runtime, vercel = marketing-site
+# deploys, gemini-cli = adversarial second-model reviews + cheap-tier work).
+npm_globals: "pm2:pm2 vercel:vercel @google/gemini-cli:gemini"
+
+# Required agentic CLIs (presence checked; versions reported).
+required_agents: "claude codex"
+
+# Optional agentic CLIs (reported if present, no failure when missing).
+optional_agents: "opencode cursor-agent antigravity kimi"
